@@ -161,7 +161,9 @@ experiments/
 configs/local/
 *.local.yaml
 
-data/
-
 .claude/
 *.zip
+
+# Data folder
+/data/
+
