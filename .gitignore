@@ -128,7 +128,7 @@ outputs/
 runs/
 logs/
 checkpoints/
-models/
+/models/
 *.ckpt
 *.pt
 *.pth
