@@ -164,11 +164,19 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Device arguments
+    # Auto-detect best available device: CUDA > MPS > CPU
+    if torch.cuda.is_available():
+        default_device = "cuda"
+    elif torch.backends.mps.is_available():
+        default_device = "mps"
+    else:
+        default_device = "cpu"
+
     parser.add_argument(
         "--device",
         type=str,
-        default="cuda" if torch.cuda.is_available() else "cpu",
-        help="Device to use for training",
+        default=default_device,
+        help="Device to use for training (cuda, mps, or cpu)",
     )
     parser.add_argument(
         "--resume",
@@ -304,14 +312,30 @@ def main():
     logger.info(f"Iterations: {config.training.num_iterations}")
     logger.info(f"Device: {args.device}")
 
-    # Check CUDA availability
+    # Check device availability
     if args.device == "cuda" and not torch.cuda.is_available():
-        logger.warning("CUDA not available, falling back to CPU")
+        logger.warning("CUDA not available, trying MPS...")
+        args.device = "mps" if torch.backends.mps.is_available() else "cpu"
+
+    if args.device == "mps" and not torch.backends.mps.is_available():
+        logger.warning("MPS not available, falling back to CPU")
         args.device = "cpu"
 
     if args.device == "cuda":
         logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
         logger.info(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    elif args.device == "mps":
+        logger.info("Using Apple Metal Performance Shaders (MPS)")
+        # MPS has limited memory, reduce max anchors
+        if config.voxel.max_anchors > 50000:
+            logger.warning("Reducing max_anchors to 50000 for MPS memory constraints")
+            config.voxel.max_anchors = 50000
+    else:
+        logger.warning("Using CPU - training will be slow")
+        # CPU mode needs very aggressive limits
+        if config.voxel.max_anchors > 20000:
+            logger.warning("Reducing max_anchors to 20000 for CPU memory constraints")
+            config.voxel.max_anchors = 20000
 
     # Create trainer
     logger.info("Creating trainer...")

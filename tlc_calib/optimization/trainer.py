@@ -295,12 +295,14 @@ class TLCCalibTrainer:
         logger.info(f"Starting training for {num_iterations} iterations...")
 
         # Create data loader (batch_size=1 as per paper)
+        # Only use pin_memory with CUDA, reduce workers for MPS/CPU
+        use_cuda = self.device == "cuda" or (isinstance(self.device, torch.device) and self.device.type == "cuda")
         dataloader = DataLoader(
             self.dataset,
             batch_size=1,
             shuffle=True,
-            num_workers=4,
-            pin_memory=True,
+            num_workers=2 if use_cuda else 0,  # MPS/CPU works better with fewer workers
+            pin_memory=use_cuda,
         )
 
         # Training loop

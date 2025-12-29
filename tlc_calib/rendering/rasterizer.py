@@ -10,12 +10,19 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-try:
-    import gsplat
-    from gsplat import rasterization
-    GSPLAT_AVAILABLE = True
-except ImportError:
-    GSPLAT_AVAILABLE = False
+# gsplat requires CUDA - check both import and CUDA availability
+GSPLAT_AVAILABLE = False
+if torch.cuda.is_available():
+    try:
+        import gsplat
+        from gsplat import rasterization
+        GSPLAT_AVAILABLE = True
+    except ImportError:
+        pass
+
+if not GSPLAT_AVAILABLE:
+    # Define placeholder for type hints
+    rasterization = None
 
 from .projection import CameraProjection, compute_pose_jacobian
 
@@ -41,6 +48,7 @@ class GaussianRasterizer(nn.Module):
         far_plane: float = 100.0,
         sh_degree: int = 0,
         use_gsplat: bool = True,
+        max_gaussians_fallback: int = 50000,  # Limit for software renderer
     ):
         """Initialize the rasterizer.
 
@@ -52,6 +60,7 @@ class GaussianRasterizer(nn.Module):
             far_plane: Far clipping plane distance
             sh_degree: Spherical harmonics degree for view-dependent color
             use_gsplat: Whether to use gsplat (if available) or fallback
+            max_gaussians_fallback: Maximum Gaussians for software renderer
         """
         super().__init__()
 
@@ -61,6 +70,7 @@ class GaussianRasterizer(nn.Module):
         self.far_plane = far_plane
         self.sh_degree = sh_degree
         self.use_gsplat = use_gsplat and GSPLAT_AVAILABLE
+        self.max_gaussians_fallback = max_gaussians_fallback
 
         self.register_buffer(
             'background',
@@ -69,6 +79,7 @@ class GaussianRasterizer(nn.Module):
 
         if not GSPLAT_AVAILABLE and use_gsplat:
             print("Warning: gsplat not available, using fallback software rasterizer")
+            print(f"  Fallback renderer limited to {max_gaussians_fallback} Gaussians per frame")
 
     def forward(
         self,
@@ -194,10 +205,29 @@ class GaussianRasterizer(nn.Module):
         K: Tensor,
         T_lidar_to_cam: Tensor,
     ) -> Dict[str, Tensor]:
-        """Fallback software rasterizer (slower, for CPU or when gsplat unavailable)."""
+        """Fallback software rasterizer (slower, for CPU/MPS when gsplat unavailable).
+
+        This renderer subsamples Gaussians to stay within memory limits.
+        Quality will be lower than CUDA gsplat but allows training on non-CUDA systems.
+        """
         device = means_3d.device
         dtype = means_3d.dtype
         N = means_3d.shape[0]
+
+        # Subsample if too many Gaussians
+        if N > self.max_gaussians_fallback:
+            # Random subsample to limit memory usage
+            indices = torch.randperm(N, device=device)[:self.max_gaussians_fallback]
+            means_3d = means_3d[indices]
+            scales = scales[indices]
+            rotations = rotations[indices]
+            colors = colors[indices] if colors.dim() == 2 else colors[indices]
+            opacities = opacities[indices]
+            N_original = N
+            N = self.max_gaussians_fallback
+        else:
+            indices = None
+            N_original = N
 
         # Transform to camera frame
         means_cam = CameraProjection.transform_points(means_3d, T_lidar_to_cam)
@@ -205,13 +235,7 @@ class GaussianRasterizer(nn.Module):
         # Project to 2D
         pixels, depth = CameraProjection.project_to_image(means_cam, K)
 
-        # Compute 2D covariances
-        cov_3d = CameraProjection.build_covariance_from_scale_rotation(scales, rotations)
-        cov_2d = CameraProjection.compute_2d_covariance(
-            cov_3d, means_cam, K, T_lidar_to_cam
-        )
-
-        # Filter visible Gaussians
+        # Filter visible Gaussians (do this BEFORE computing covariances to save memory)
         visible_mask = CameraProjection.filter_visible_gaussians(
             means_cam, pixels, depth,
             self.image_height, self.image_width,
@@ -225,22 +249,31 @@ class GaussianRasterizer(nn.Module):
         depth_map = torch.zeros(self.image_height, self.image_width, device=device, dtype=dtype)
         alpha_map = torch.zeros(self.image_height, self.image_width, device=device, dtype=dtype)
 
-        if visible_mask.sum() == 0:
+        n_visible = visible_mask.sum().item()
+        if n_visible == 0:
             return {
                 'rendered_image': rendered_image,
                 'depth': depth_map,
                 'alpha': alpha_map,
-                'radii': torch.zeros(N, device=device),
+                'radii': torch.zeros(N_original, device=device),
             }
 
-        # Get visible Gaussians
+        # Only compute covariances for visible Gaussians (memory optimization)
+        vis_means_cam = means_cam[visible_mask]
+        vis_scales = scales[visible_mask]
+        vis_rotations = rotations[visible_mask]
         vis_pixels = pixels[visible_mask]
         vis_depth = depth[visible_mask]
-        vis_cov_2d = cov_2d[visible_mask]
         vis_colors = colors[visible_mask] if colors.dim() == 2 else colors[visible_mask, 0]
         vis_opacities = opacities[visible_mask]
         if vis_opacities.dim() == 2:
             vis_opacities = vis_opacities.squeeze(-1)
+
+        # Compute 2D covariances only for visible Gaussians
+        vis_cov_3d = CameraProjection.build_covariance_from_scale_rotation(vis_scales, vis_rotations)
+        vis_cov_2d = CameraProjection.compute_2d_covariance(
+            vis_cov_3d, vis_means_cam, K, T_lidar_to_cam
+        )
 
         # Sort by depth (back to front for proper blending)
         sort_indices = torch.argsort(vis_depth, descending=True)
@@ -250,14 +283,17 @@ class GaussianRasterizer(nn.Module):
         vis_colors = vis_colors[sort_indices]
         vis_opacities = vis_opacities[sort_indices]
 
-        # Create pixel grid
-        y_coords = torch.arange(self.image_height, device=device, dtype=dtype)
-        x_coords = torch.arange(self.image_width, device=device, dtype=dtype)
-        grid_y, grid_x = torch.meshgrid(y_coords, x_coords, indexing='ij')
-        pixel_coords = torch.stack([grid_x, grid_y], dim=-1)  # (H, W, 2)
+        # Limit number of Gaussians to render for performance
+        max_render = min(len(vis_pixels), 10000)  # Hard limit for per-frame rendering
+        if len(vis_pixels) > max_render:
+            # Keep closest Gaussians (they contribute most)
+            vis_pixels = vis_pixels[-max_render:]  # Last ones are closest (sorted descending)
+            vis_depth = vis_depth[-max_render:]
+            vis_cov_2d = vis_cov_2d[-max_render:]
+            vis_colors = vis_colors[-max_render:]
+            vis_opacities = vis_opacities[-max_render:]
 
-        # Render each Gaussian (vectorized per-Gaussian for efficiency)
-        # Note: This is still slower than CUDA but works on CPU
+        # Render each Gaussian
         T_accum = torch.ones(self.image_height, self.image_width, device=device, dtype=dtype)
 
         for i in range(len(vis_pixels)):
@@ -267,13 +303,13 @@ class GaussianRasterizer(nn.Module):
             opacity = vis_opacities[i]
             d = vis_depth[i]
 
-            # Compute Gaussian extent (3 sigma)
-            eigenvalues = torch.linalg.eigvalsh(cov)
-            radius = 3.0 * torch.sqrt(eigenvalues.max())
+            # Compute Gaussian extent (3 sigma) - use trace for faster computation
+            trace = cov[0, 0] + cov[1, 1]
+            radius = 3.0 * torch.sqrt(trace / 2 + 1e-6)  # Approximate max eigenvalue
             radius_int = int(radius.item()) + 1
 
-            # Skip if radius too small
-            if radius_int < 1:
+            # Skip if radius too small or too large
+            if radius_int < 1 or radius_int > 100:
                 continue
 
             # Get bounding box
@@ -286,13 +322,25 @@ class GaussianRasterizer(nn.Module):
             if x_min >= x_max or y_min >= y_max:
                 continue
 
-            # Get local pixel coordinates
-            local_pixels = pixel_coords[y_min:y_max, x_min:x_max]  # (h, w, 2)
+            # Create local pixel grid (more efficient than global)
+            local_y = torch.arange(y_min, y_max, device=device, dtype=dtype)
+            local_x = torch.arange(x_min, x_max, device=device, dtype=dtype)
+            grid_y, grid_x = torch.meshgrid(local_y, local_x, indexing='ij')
+            local_pixels = torch.stack([grid_x, grid_y], dim=-1)  # (h, w, 2)
 
             # Compute Gaussian weights
             diff = local_pixels - mean  # (h, w, 2)
-            cov_inv = torch.linalg.inv(cov + 1e-6 * torch.eye(2, device=device, dtype=dtype))
-            mahal = torch.einsum('...i,ij,...j->...', diff, cov_inv, diff)
+
+            # Compute inverse covariance
+            det = cov[0, 0] * cov[1, 1] - cov[0, 1] * cov[1, 0] + 1e-6
+            cov_inv = torch.stack([
+                torch.stack([cov[1, 1], -cov[0, 1]]),
+                torch.stack([-cov[1, 0], cov[0, 0]])
+            ]) / det
+
+            mahal = (diff[..., 0] ** 2 * cov_inv[0, 0] +
+                     2 * diff[..., 0] * diff[..., 1] * cov_inv[0, 1] +
+                     diff[..., 1] ** 2 * cov_inv[1, 1])
             gaussian_weight = torch.exp(-0.5 * mahal)  # (h, w)
 
             # Alpha compositing
@@ -322,17 +370,12 @@ class GaussianRasterizer(nn.Module):
         rendered_image = torch.clamp(rendered_image, 0.0, 1.0)
         alpha_map = torch.clamp(alpha_map, 0.0, 1.0)
 
-        # Compute approximate radii
-        radii = torch.zeros(N, device=device)
-        radii[visible_mask] = 3.0 * torch.sqrt(
-            torch.linalg.eigvalsh(cov_2d[visible_mask]).max(dim=-1).values
-        )
-
+        # Return zero radii (not accurately computed in fallback mode)
         return {
             'rendered_image': rendered_image,
             'depth': depth_map,
             'alpha': alpha_map,
-            'radii': radii,
+            'radii': torch.zeros(N_original, device=device),
         }
 
 
