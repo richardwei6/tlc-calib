@@ -237,10 +237,9 @@ def build_config(args: argparse.Namespace) -> TLCCalibConfig:
 
     # Model config
     model_config = ModelConfig(
-        num_auxiliaries=args.num_auxiliaries,
-        avc_beta=args.avc_beta,
-        anchor_feature_dim=yaml_config.get('model', {}).get('anchor_feature_dim', 32),
-        mlp_hidden_dim=yaml_config.get('model', {}).get('mlp_hidden_dim', 32),
+        num_auxiliary=args.num_auxiliaries,
+        feature_dim=yaml_config.get('model', {}).get('anchor_feature_dim', 32),
+        hidden_dim=yaml_config.get('model', {}).get('mlp_hidden_dim', 32),
         sh_degree=yaml_config.get('model', {}).get('sh_degree', 0),
     )
 
@@ -250,22 +249,28 @@ def build_config(args: argparse.Namespace) -> TLCCalibConfig:
         rotation_lr=args.rotation_lr,
         translation_lr=args.translation_lr,
         weight_decay=args.weight_decay,
-        weight_decay_end_iter=args.iterations // 2,
-        lambda_dssim=args.lambda_dssim,
+        weight_decay_until=args.iterations // 2,
+        lambda_ssim=args.lambda_dssim,
         lambda_scale=args.lambda_scale,
-        scale_threshold=args.scale_threshold,
+        sigma=args.scale_threshold,
         log_interval=args.log_interval,
         save_interval=args.save_interval,
-        checkpoint_dir=Path(args.output_dir) / "checkpoints",
-        vram_limit_gb=args.vram_limit if args.vram_limit > 0 else None,
+        unlimited_vram=args.vram_limit == 0,
     )
 
-    return TLCCalibConfig(
-        data=data_config,
-        model=model_config,
-        training=training_config,
-        camera_configs=camera_configs,
+    # Create full config
+    config = TLCCalibConfig(
+        output_dir=Path(args.output_dir),
     )
+    config.data = data_config
+    config.model = model_config
+    config.training = training_config
+    config.camera_configs = camera_configs
+
+    # Store avc_beta in voxel config
+    config.voxel.beta = args.avc_beta
+
+    return config
 
 
 def main():

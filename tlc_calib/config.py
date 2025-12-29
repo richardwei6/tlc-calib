@@ -122,9 +122,10 @@ class VoxelConfig:
 
     beta: float = 5000.0  # Proportionality factor for N_target
     tolerance: int = 100  # Binary search tolerance
-    eps_min: float = 0.01  # Minimum voxel size
+    eps_min: float = 0.05  # Minimum voxel size (0.05m = 5cm)
     eps_max: float = 10.0  # Maximum voxel size
     max_iterations: int = 50  # Max binary search iterations
+    max_anchors: int = 200000  # Maximum anchors to prevent OOM
 
     # Fixed voxel size (if set, overrides adaptive control)
     fixed_voxel_size: Optional[float] = None

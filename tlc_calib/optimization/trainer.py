@@ -83,7 +83,7 @@ class TLCCalibTrainer:
         self.dataset = TLCCalibDataset(
             config=self.config,
             split="train",
-            train_ratio=self.config.training.train_ratio,
+            train_ratio=0.9,  # Default train ratio
         )
 
         # Get aggregated point cloud
@@ -97,7 +97,10 @@ class TLCCalibTrainer:
         logger.info("Computing adaptive voxel size...")
         voxel_size = compute_adaptive_voxel_size(
             points=points,
-            beta=self.config.model.avc_beta,
+            beta=self.config.voxel.beta,
+            eps_min=self.config.voxel.eps_min,
+            eps_max=self.config.voxel.eps_max,
+            max_anchors=self.config.voxel.max_anchors,
         )
         logger.info(f"Adaptive voxel size: {voxel_size:.4f}")
 
@@ -108,18 +111,16 @@ class TLCCalibTrainer:
 
         anchors = AnchorGaussians(
             positions=anchor_positions,
-            feature_dim=self.config.model.anchor_feature_dim,
+            feature_dim=self.config.model.feature_dim,
             initial_scale=voxel_size,
         )
 
         # 4. Create Gaussian model
         self.gaussian_model = GaussianModel(
             anchors=anchors,
-            num_auxiliaries=self.config.model.num_auxiliaries,
-            hidden_dim=self.config.model.mlp_hidden_dim,
-            sh_degree=self.config.model.sh_degree,
+            model_config=self.config.model,
         ).to(self.device)
-        logger.info(f"Gaussian model created with {self.gaussian_model.num_gaussians} total Gaussians")
+        logger.info(f"Gaussian model created with {self.gaussian_model.get_gaussian_count()} total Gaussians")
 
         # 5. Create camera rig
         initial_extrinsics = self.dataset.get_all_extrinsics()
@@ -141,18 +142,18 @@ class TLCCalibTrainer:
         self.rasterizer = GaussianRasterizer(
             image_height=image_height,
             image_width=image_width,
-            near_plane=self.config.training.near_plane,
-            far_plane=self.config.training.far_plane,
+            near_plane=self.config.render.near,
+            far_plane=self.config.render.far,
             sh_degree=self.config.model.sh_degree,
         ).to(self.device)
         logger.info(f"Rasterizer created for {image_width}x{image_height} images")
 
         # 7. Create losses
         self.photo_loss = PhotometricLoss(
-            lambda_dssim=self.config.training.lambda_dssim,
+            lambda_dssim=self.config.training.lambda_ssim,
         )
         self.scale_reg = ScaleRegularization(
-            sigma_threshold=self.config.training.scale_threshold,
+            sigma_threshold=self.config.training.sigma,
         )
 
         # 8. Create optimizer
@@ -199,7 +200,7 @@ class TLCCalibTrainer:
 
         From paper: weight_decay=0.01 for first 15K iterations, then 0
         """
-        if iteration == self.config.training.weight_decay_end_iter:
+        if iteration == self.config.training.weight_decay_until:
             for param_group in self.optimizer.param_groups:
                 param_group['weight_decay'] = 0.0
             logger.info(f"Iteration {iteration}: Disabled weight decay")
@@ -237,7 +238,7 @@ class TLCCalibTrainer:
         view_dir = get_view_direction(T_lidar_to_cam)
 
         # Get all Gaussians
-        gaussians = self.gaussian_model.get_all_gaussians(view_dir)
+        gaussians = self.gaussian_model(view_dir)
 
         # Render
         render_result = self.rasterizer(
@@ -367,7 +368,7 @@ class TLCCalibTrainer:
 
     def _save_checkpoint(self, final: bool = False) -> None:
         """Save training checkpoint."""
-        checkpoint_dir = Path(self.config.training.checkpoint_dir)
+        checkpoint_dir = Path(self.config.output_dir) / "checkpoints"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
         suffix = "final" if final else f"iter_{self.iteration}"
@@ -483,10 +484,17 @@ class SingleCameraTrainer:
             initial_scale=voxel_size,
         )
 
+        # Create model config for GaussianModel
+        from ..config import ModelConfig
+        model_config = ModelConfig(
+            feature_dim=anchor_feature_dim,
+            num_auxiliary=num_auxiliaries,
+            hidden_dim=mlp_hidden_dim,
+        )
+
         self.gaussian_model = GaussianModel(
             anchors=anchors,
-            num_auxiliaries=num_auxiliaries,
-            hidden_dim=mlp_hidden_dim,
+            model_config=model_config,
         ).to(self.device)
 
         # Camera pose
@@ -507,8 +515,8 @@ class SingleCameraTrainer:
         ).to(self.device)
 
         # Losses
-        self.photo_loss = PhotometricLoss(lambda_dssim=self.config.lambda_dssim)
-        self.scale_reg = ScaleRegularization(sigma_threshold=self.config.scale_threshold)
+        self.photo_loss = PhotometricLoss(lambda_dssim=self.config.lambda_ssim)
+        self.scale_reg = ScaleRegularization(sigma_threshold=self.config.sigma)
 
         # Optimizer
         all_params = (
@@ -532,7 +540,7 @@ class SingleCameraTrainer:
         view_dir = get_view_direction(T)
 
         # Get Gaussians
-        gaussians = self.gaussian_model.get_all_gaussians(view_dir)
+        gaussians = self.gaussian_model(view_dir)
 
         # Render
         result = self.rasterizer(
@@ -574,7 +582,7 @@ class SingleCameraTrainer:
                 image = image.permute(1, 2, 0)
 
             # Update weight decay
-            if self.iteration == self.config.weight_decay_end_iter:
+            if self.iteration == self.config.weight_decay_until:
                 for pg in self.optimizer.param_groups:
                     pg['weight_decay'] = 0.0
 

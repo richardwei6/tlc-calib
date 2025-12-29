@@ -253,3 +253,65 @@ def estimate_trajectory_distance(points: Tensor) -> float:
     bounds_max = points.max(dim=0).values
     diagonal = torch.norm(bounds_max - bounds_min).item()
     return diagonal
+
+
+def compute_adaptive_voxel_size(
+    points: Tensor,
+    beta: float = 5000.0,
+    eps_min: float = 0.05,
+    eps_max: float = 2.0,
+    tolerance: int = 100,
+    max_iterations: int = 50,
+    max_anchors: int = 200000,
+) -> float:
+    """Compute adaptive voxel size for anchor Gaussians.
+
+    Convenience function that estimates trajectory distance and finds
+    optimal voxel size using binary search.
+
+    Args:
+        points: Point cloud of shape (N, 3)
+        beta: Proportionality factor (default 5000)
+        eps_min: Minimum voxel size
+        eps_max: Maximum voxel size
+        tolerance: Acceptable deviation from target
+        max_iterations: Maximum binary search iterations
+        max_anchors: Maximum number of anchors (to prevent OOM)
+
+    Returns:
+        Optimal voxel size
+    """
+    # Estimate trajectory distance from point cloud extent
+    trajectory_distance = estimate_trajectory_distance(points)
+
+    # Compute target number of voxels (capped by max_anchors)
+    n_target = min(int(beta * trajectory_distance), max_anchors)
+    print(f"  Trajectory distance: {trajectory_distance:.2f}m, target anchors: {n_target}")
+
+    # Convert to numpy for Open3D
+    points_np = points.cpu().numpy() if isinstance(points, Tensor) else points
+
+    # Binary search for optimal voxel size
+    for i in range(max_iterations):
+        eps_mid = (eps_min + eps_max) / 2
+
+        # Count voxels at this size
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(points_np)
+        voxel_grid = o3d.geometry.VoxelGrid.create_from_point_cloud(pcd, eps_mid)
+        n_voxels = len(voxel_grid.get_voxels())
+
+        if i % 10 == 0:
+            print(f"  Binary search iter {i}: eps={eps_mid:.4f}, voxels={n_voxels}")
+
+        if abs(n_voxels - n_target) < tolerance:
+            print(f"  Found optimal voxel size: {eps_mid:.4f} ({n_voxels} anchors)")
+            return eps_mid
+        elif n_voxels > n_target:
+            eps_min = eps_mid
+        else:
+            eps_max = eps_mid
+
+    final_eps = (eps_min + eps_max) / 2
+    print(f"  Final voxel size: {final_eps:.4f}")
+    return final_eps

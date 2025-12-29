@@ -31,6 +31,7 @@ dependencies = [
     "tqdm>=4.65.0",
     "pytorch-msssim>=1.0.0",
     "scipy>=1.10.0",
+    "gsplat>=1.0.0",  # Requires CUDA; falls back to software renderer if unavailable
 ]
 
 [project.optional-dependencies]
@@ -38,9 +39,6 @@ dev = [
     "pytest>=7.0.0",
     "black>=23.0.0",
     "ruff>=0.1.0",
-]
-cuda = [
-    "gsplat>=1.0.0",
 ]
 
 [project.scripts]
