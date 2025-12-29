@@ -160,6 +160,11 @@ class GaussianRasterizer(nn.Module):
         # Build covariance matrices from scale and rotation
         cov_3d = CameraProjection.build_covariance_from_scale_rotation(scales, rotations)
 
+        # Create background image (gsplat expects shape: batch, H, W, C)
+        bg_image = self.background.view(1, 1, 1, 3).expand(
+            1, self.image_height, self.image_width, 3
+        ).contiguous()
+
         # Call gsplat rasterization
         renders, alphas, meta = rasterization(
             means=means_cam,  # Points in camera space
@@ -174,7 +179,7 @@ class GaussianRasterizer(nn.Module):
             near_plane=self.near_plane,
             far_plane=self.far_plane,
             sh_degree=active_sh_degree,
-            backgrounds=self.background.unsqueeze(0),
+            backgrounds=bg_image,
             render_mode="RGB+D",
         )
 
