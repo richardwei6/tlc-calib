@@ -164,3 +164,4 @@ configs/local/
 data/
 
 .claude/
+*.zip
