@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tlc-calib"
+version = "0.1.0"
+description = "Targetless LiDAR-Camera Calibration with Neural Gaussian Splatting"
+readme = "README.md"
+requires-python = ">=3.10,<3.12"
+license = {text = "MIT"}
+authors = [
+    {name = "TLC-Calib Authors"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "numpy>=1.24.0",
+    "open3d>=0.17.0",
+    "pillow>=9.0.0",
+    "pyyaml>=6.0",
+    "tqdm>=4.65.0",
+    "pytorch-msssim>=1.0.0",
+    "scipy>=1.10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
+cuda = [
+    "gsplat>=1.0.0",
+]
+
+[project.scripts]
+tlc-train = "tlc_calib.scripts.train:main"
+tlc-eval = "tlc_calib.scripts.evaluate:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tlc_calib*"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311"]
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "W", "I", "N"]
+ignore = ["E501"]

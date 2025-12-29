@@ -1,0 +1,119 @@
+# TLC-Calib Default Configuration
+# Targetless LiDAR-Camera Calibration with Neural Gaussian Splatting
+#
+# Usage:
+#   python scripts/train.py --config configs/default.yaml
+#
+# Override specific camera offsets per session by editing the cameras section below.
+
+# Data configuration
+data:
+  # Path to data directory (relative to working directory or absolute)
+  data_dir: "data"
+
+  # Point cloud folder name (within data_dir)
+  pc_folder: "pc"
+
+  # Image folder name (within each camera folder)
+  image_folder: "images"
+
+  # Image downsampling factor (4 = 7680x2856 -> 1920x714)
+  image_downsample: 4
+
+  # Cameras to calibrate (comment out cameras to exclude them)
+  cameras:
+    - cam02  # FWC_C - Front Wide Center
+    - cam03  # FNC   - Front Narrow Center
+    - cam04  # RNC_R - Rear Narrow Right
+    - cam05  # FWC_R - Front Wide Right
+    - cam06  # RNC_C - Rear Narrow Center
+    - cam07  # FWC_L - Front Wide Left
+    - cam08  # RNC_L - Rear Narrow Left
+
+# Camera-specific configuration
+# Wide camera Y offsets can be adjusted per session
+cameras:
+  cam02:  # FWC_C - Front Wide Center
+    wide_offset_y: 500  # Adjust this per session if needed
+
+  cam05:  # FWC_R - Front Wide Right
+    wide_offset_y: 300  # Adjust this per session if needed
+
+  cam07:  # FWC_L - Front Wide Left
+    wide_offset_y: 300  # Adjust this per session if needed
+
+# Model configuration
+model:
+  # Number of auxiliary Gaussians per anchor (K in paper)
+  num_auxiliaries: 5
+
+  # AVC proportionality constant (beta in paper)
+  # Target anchors = beta * trajectory_distance
+  avc_beta: 5000.0
+
+  # Anchor feature dimension
+  anchor_feature_dim: 32
+
+  # MLP hidden layer dimension
+  mlp_hidden_dim: 32
+
+  # Number of MLP layers
+  mlp_num_layers: 2
+
+  # Spherical harmonics degree for view-dependent color
+  # 0 = RGB only, 1-3 = SH bands
+  sh_degree: 0
+
+# Training configuration
+training:
+  # Total training iterations
+  num_iterations: 30000
+
+  # Learning rates (from paper)
+  rotation_lr: 0.002      # 2e-3
+  translation_lr: 0.008   # 8e-3
+
+  # Learning rates for Gaussian parameters
+  anchor_feature_lr: 0.01
+  anchor_scale_lr: 0.005
+  mlp_lr: 0.001
+
+  # Weight decay (applied for first half of training)
+  weight_decay: 0.01
+
+  # Loss weights
+  lambda_dssim: 0.2       # D-SSIM weight in photometric loss
+  lambda_scale: 1.0       # Scale regularization weight
+
+  # Scale ratio threshold (sigma in paper)
+  # Penalizes Gaussians with max_scale/min_scale > threshold
+  scale_threshold: 10.0
+
+  # Clipping planes
+  near_plane: 0.1
+  far_plane: 100.0
+
+  # Train/validation split
+  train_ratio: 0.9
+
+  # Logging and checkpointing
+  log_interval: 100
+  save_interval: 5000
+
+  # VRAM limit in GB (null for unlimited)
+  vram_limit_gb: 8
+
+# Output configuration
+output:
+  # Output directory for checkpoints and results
+  output_dir: "outputs"
+
+  # Save rendered images during training
+  save_renders: false
+  render_interval: 1000
+
+# Example single-camera configuration:
+# To calibrate only cam02, use:
+#   python scripts/train.py --config configs/default.yaml --camera cam02
+#
+# Or modify the cameras list above to include only the desired cameras.
