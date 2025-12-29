@@ -361,6 +361,37 @@ def main():
     torch.save(results, results_path)
     logger.info(f"Saved results to {results_path}")
 
+    # Save human-readable text file with rotation and translation
+    txt_path = output_dir / "calibration_results.txt"
+    with open(txt_path, 'w') as f:
+        f.write("TLC-Calib Calibration Results\n")
+        f.write("=" * 60 + "\n\n")
+
+        for cam_id, result in results.items():
+            extrinsic = result['extrinsic']  # 4x4 matrix
+            rotation = extrinsic[:3, :3]  # 3x3 rotation matrix
+            translation = extrinsic[:3, 3]  # 3x1 translation vector
+
+            f.write(f"Camera: {cam_id}\n")
+            f.write("-" * 40 + "\n")
+            f.write(f"Rotation Error: {result['rotation_error_deg']:.6f} degrees\n")
+            f.write(f"Translation Error: {result['translation_error_m']:.6f} meters\n\n")
+
+            f.write("Rotation Matrix (3x3):\n")
+            for i in range(3):
+                f.write(f"  [{rotation[i, 0]:12.8f}, {rotation[i, 1]:12.8f}, {rotation[i, 2]:12.8f}]\n")
+
+            f.write("\nTranslation Vector (x, y, z):\n")
+            f.write(f"  [{translation[0]:12.8f}, {translation[1]:12.8f}, {translation[2]:12.8f}]\n")
+
+            f.write("\nFull Extrinsic Matrix (4x4):\n")
+            for i in range(4):
+                f.write(f"  [{extrinsic[i, 0]:12.8f}, {extrinsic[i, 1]:12.8f}, {extrinsic[i, 2]:12.8f}, {extrinsic[i, 3]:12.8f}]\n")
+
+            f.write("\n" + "=" * 60 + "\n\n")
+
+    logger.info(f"Saved human-readable results to {txt_path}")
+
     # Print final results
     logger.info("\n" + "=" * 50)
     logger.info("FINAL CALIBRATION RESULTS")
