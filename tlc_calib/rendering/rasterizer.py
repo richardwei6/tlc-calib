@@ -160,12 +160,8 @@ class GaussianRasterizer(nn.Module):
         # Build covariance matrices from scale and rotation
         cov_3d = CameraProjection.build_covariance_from_scale_rotation(scales, rotations)
 
-        # Create background image (gsplat expects shape: batch, H, W, C)
-        bg_image = self.background.view(1, 1, 1, 3).expand(
-            1, self.image_height, self.image_width, 3
-        ).contiguous()
-
         # Call gsplat rasterization
+        # Note: render RGB only first, depth can be computed separately if needed
         renders, alphas, meta = rasterization(
             means=means_cam,  # Points in camera space
             quats=rotations,
@@ -179,14 +175,14 @@ class GaussianRasterizer(nn.Module):
             near_plane=self.near_plane,
             far_plane=self.far_plane,
             sh_degree=active_sh_degree,
-            backgrounds=bg_image,
-            render_mode="RGB+D",
+            render_mode="RGB",
         )
 
         # Extract outputs
-        rendered_image = renders[0, ..., :3]  # (H, W, 3)
-        depth = renders[0, ..., 3]  # (H, W)
+        rendered_image = renders[0]  # (H, W, 3)
         alpha = alphas[0]  # (H, W)
+        # Depth not available in RGB mode, return zeros
+        depth = torch.zeros(self.image_height, self.image_width, device=device, dtype=means_3d.dtype)
 
         # Get radii from meta if available
         radii = meta.get("radii", torch.zeros(N, device=device))
