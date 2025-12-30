@@ -385,17 +385,21 @@ class TLCCalibTrainer:
             )
 
             # Get gradient norms for pose parameters
-            pose = self.camera_rig.poses[cam_id]
+            # CameraRig uses safe_id mapping (replaces '-' with '_')
+            safe_id = self.camera_rig._id_map[cam_id]
+            rot_param = self.camera_rig.rotations[safe_id]
+            trans_param = self.camera_rig.translations[safe_id]
+
             rot_grad_norm = 0.0
             trans_grad_norm = 0.0
-            if pose.delta_rotation.grad is not None:
-                rot_grad_norm = pose.delta_rotation.grad.norm().item()
-            if pose.delta_translation.grad is not None:
-                trans_grad_norm = pose.delta_translation.grad.norm().item()
+            if rot_param.grad is not None:
+                rot_grad_norm = rot_param.grad.norm().item()
+            if trans_param.grad is not None:
+                trans_grad_norm = trans_param.grad.norm().item()
 
             # Get actual parameter values
-            delta_rot = pose.delta_rotation.detach()
-            delta_trans = pose.delta_translation.detach()
+            delta_rot = rot_param.detach()
+            delta_trans = trans_param.detach()
 
             logger.info(
                 f"  {cam_id}: rot_err={delta['rotation_error_deg']:.3f}°, "
