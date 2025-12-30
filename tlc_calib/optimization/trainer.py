@@ -294,6 +294,20 @@ class TLCCalibTrainer:
 
         logger.info(f"Starting training for {num_iterations} iterations...")
 
+        # Log initial pose state BEFORE any training
+        logger.info("=" * 60)
+        logger.info("INITIAL CALIBRATION STATE (before training)")
+        logger.info("=" * 60)
+        for cam_id in self.camera_rig.camera_ids:
+            delta = self.camera_rig.compute_pose_delta(
+                cam_id, self.initial_extrinsics[cam_id]
+            )
+            logger.info(
+                f"  {cam_id}: rot_err={delta['rotation_error_deg']:.6f}°, "
+                f"trans_err={delta['translation_error_m']:.6f}m"
+            )
+        logger.info("=" * 60)
+
         # Create data loader (batch_size=1 as per paper)
         # Only use pin_memory with CUDA, reduce workers for MPS/CPU
         use_cuda = self.device == "cuda" or (isinstance(self.device, torch.device) and self.device.type == "cuda")
@@ -325,8 +339,14 @@ class TLCCalibTrainer:
                 'scale': f"{losses['scale_loss']:.4f}",
             })
 
-            # Log periodically
-            if self.iteration % self.config.training.log_interval == 0:
+            # Log periodically (more frequent in early iterations to catch issues)
+            log_now = (
+                self.iteration % self.config.training.log_interval == 0 or
+                self.iteration < 20 or  # Log every iteration for first 20
+                (self.iteration < 100 and self.iteration % 10 == 0) or  # Every 10 for first 100
+                (self.iteration < 1000 and self.iteration % 50 == 0)  # Every 50 for first 1000
+            )
+            if log_now:
                 self._log_training_state(losses)
 
             # Save checkpoint periodically
@@ -358,15 +378,36 @@ class TLCCalibTrainer:
             f"scale={losses['scale_loss']:.4f}"
         )
 
-        # Log pose deltas
+        # Log pose deltas and gradient norms
         for cam_id in self.camera_rig.camera_ids:
             delta = self.camera_rig.compute_pose_delta(
                 cam_id, self.initial_extrinsics[cam_id]
             )
+
+            # Get gradient norms for pose parameters
+            pose = self.camera_rig.poses[cam_id]
+            rot_grad_norm = 0.0
+            trans_grad_norm = 0.0
+            if pose.delta_rotation.grad is not None:
+                rot_grad_norm = pose.delta_rotation.grad.norm().item()
+            if pose.delta_translation.grad is not None:
+                trans_grad_norm = pose.delta_translation.grad.norm().item()
+
+            # Get actual parameter values
+            delta_rot = pose.delta_rotation.detach()
+            delta_trans = pose.delta_translation.detach()
+
             logger.info(
                 f"  {cam_id}: rot_err={delta['rotation_error_deg']:.3f}°, "
-                f"trans_err={delta['translation_error_m']:.4f}m"
+                f"trans_err={delta['translation_error_m']:.4f}m, "
+                f"rot_grad={rot_grad_norm:.6f}, trans_grad={trans_grad_norm:.6f}"
             )
+            # Log pose parameters every 1000 iterations or early on
+            if self.iteration < 100 or self.iteration % 1000 == 0:
+                logger.info(
+                    f"    delta_rot=[{delta_rot[0]:.6f}, {delta_rot[1]:.6f}, {delta_rot[2]:.6f}], "
+                    f"delta_trans=[{delta_trans[0]:.6f}, {delta_trans[1]:.6f}, {delta_trans[2]:.6f}]"
+                )
 
     def _save_checkpoint(self, final: bool = False) -> None:
         """Save training checkpoint."""

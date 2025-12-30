@@ -286,20 +286,22 @@ def main():
     # Parse arguments
     args = parse_args()
 
-    # Setup logging
+    # Create output directory FIRST (before logging setup)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Setup logging to both console and file
+    log_file = output_dir / "training.log"
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
             logging.StreamHandler(),
-            logging.FileHandler(Path(args.output_dir) / "training.log"),
-        ] if Path(args.output_dir).exists() else [logging.StreamHandler()],
+            logging.FileHandler(log_file),
+        ],
     )
     logger = logging.getLogger(__name__)
-
-    # Create output directory
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Logging to: {log_file}")
 
     # Build config
     logger.info("Building configuration...")

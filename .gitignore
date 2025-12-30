@@ -150,6 +150,9 @@ experiments/
 # data/*/images/*.png
 # data/*/images/*.jpg
 # data/*/images/*.jpeg
+*.png
+*.jpg
+*.jpeg
 
 # Temporary files
 *.tmp
