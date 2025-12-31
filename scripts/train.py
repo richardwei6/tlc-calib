@@ -143,6 +143,26 @@ def parse_args() -> argparse.Namespace:
         help="Scale regularization weight",
     )
 
+    # Calibration refinement arguments (to prevent joint optimization degeneracy)
+    parser.add_argument(
+        "--perturb-rotation",
+        type=float,
+        default=0.0,
+        help="Perturb initial calibration rotation by this many degrees (to test refinement)",
+    )
+    parser.add_argument(
+        "--perturb-translation",
+        type=float,
+        default=0.0,
+        help="Perturb initial calibration translation by this many meters (to test refinement)",
+    )
+    parser.add_argument(
+        "--freeze-gaussians-until",
+        type=int,
+        default=0,
+        help="Freeze Gaussian parameters until this iteration (staged optimization)",
+    )
+
     # Output arguments
     parser.add_argument(
         "--output-dir",
@@ -341,7 +361,19 @@ def main():
 
     # Create trainer
     logger.info("Creating trainer...")
-    trainer = TLCCalibTrainer(config=config, device=args.device)
+    trainer = TLCCalibTrainer(
+        config=config,
+        device=args.device,
+        perturb_rotation_deg=args.perturb_rotation,
+        perturb_translation_m=args.perturb_translation,
+        freeze_gaussians_until=args.freeze_gaussians_until,
+    )
+
+    # Log calibration refinement settings
+    if args.perturb_rotation > 0 or args.perturb_translation > 0:
+        logger.info(f"Initial calibration will be perturbed by: rot={args.perturb_rotation}°, trans={args.perturb_translation}m")
+    if args.freeze_gaussians_until > 0:
+        logger.info(f"Staged optimization: Gaussians frozen until iteration {args.freeze_gaussians_until}")
 
     # Setup trainer
     trainer.setup()
@@ -370,15 +402,23 @@ def main():
         f.write("=" * 60 + "\n\n")
 
         for cam_id, result in results.items():
+            # Optimized extrinsic
             extrinsic = result['extrinsic']  # 4x4 matrix
             rotation = extrinsic[:3, :3]  # 3x3 rotation matrix
             translation = extrinsic[:3, 3]  # 3x1 translation vector
+
+            # Original extrinsic (initial calibration before optimization)
+            original_extrinsic = result['initial_extrinsic']  # 4x4 matrix
+            original_rotation = original_extrinsic[:3, :3]
+            original_translation = original_extrinsic[:3, 3]
 
             f.write(f"Camera: {cam_id}\n")
             f.write("-" * 40 + "\n")
             f.write(f"Rotation Error: {result['rotation_error_deg']:.6f} degrees\n")
             f.write(f"Translation Error: {result['translation_error_m']:.6f} meters\n\n")
 
+            # Write OPTIMIZED calibration
+            f.write("=== OPTIMIZED CALIBRATION ===\n\n")
             f.write("Rotation Matrix (3x3):\n")
             for i in range(3):
                 f.write(f"  [{rotation[i, 0]:12.8f}, {rotation[i, 1]:12.8f}, {rotation[i, 2]:12.8f}]\n")
@@ -389,6 +429,19 @@ def main():
             f.write("\nFull Extrinsic Matrix (4x4):\n")
             for i in range(4):
                 f.write(f"  [{extrinsic[i, 0]:12.8f}, {extrinsic[i, 1]:12.8f}, {extrinsic[i, 2]:12.8f}, {extrinsic[i, 3]:12.8f}]\n")
+
+            # Write ORIGINAL calibration
+            f.write("\n=== ORIGINAL CALIBRATION ===\n\n")
+            f.write("Rotation Matrix (3x3):\n")
+            for i in range(3):
+                f.write(f"  [{original_rotation[i, 0]:12.8f}, {original_rotation[i, 1]:12.8f}, {original_rotation[i, 2]:12.8f}]\n")
+
+            f.write("\nTranslation Vector (x, y, z):\n")
+            f.write(f"  [{original_translation[0]:12.8f}, {original_translation[1]:12.8f}, {original_translation[2]:12.8f}]\n")
+
+            f.write("\nFull Extrinsic Matrix (4x4):\n")
+            for i in range(4):
+                f.write(f"  [{original_extrinsic[i, 0]:12.8f}, {original_extrinsic[i, 1]:12.8f}, {original_extrinsic[i, 2]:12.8f}, {original_extrinsic[i, 3]:12.8f}]\n")
 
             f.write("\n" + "=" * 60 + "\n\n")
 

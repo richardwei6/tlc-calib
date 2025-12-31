@@ -5,21 +5,50 @@ python scripts/train.py \
     --iterations 30000 \
     --rotation-lr 0.0002 \
     --translation-lr 0.0008 \
-    --output-dir outputs/cam02_30k
+    --output-dir outputs/[session name]
 
+-- Run in one tmux pane with perturbations:
+python scripts/train.py \
+    --data-dir data \
+    --camera cam02 \
+    --iterations 30000 \
+    --rotation-lr 0.0002 \
+    --translation-lr 0.0008 \
+    --perturb-rotation 2.0 \
+    --perturb-translation 0.1 \
+    --output-dir outputs/cam02_30k_perturb
 
 -- Monitor in another tmux pane:
-tail -f outputs/cam02_30k/training.log
+tail -f outputs/[session name]/training.log
 
 
--- Visualize Calibration
+-- Visualize Calibration (optimized only)
 python scripts/visualize_calibration.py \
-    --results outputs/calibration_results.txt \
+    --results outputs/cam02_30k/calibration_results.txt \
     --data-dir data \
     --camera cam02 \
     --frame 10 \
     --output overlay.png
 
 
+-- Visualize Calibration with comparison (outputs both optimized and original)
+python scripts/visualize_calibration.py \
+    --results outputs/cam02_30k/calibration_results.txt \
+    --data-dir data \
+    --camera cam02 \
+    --frame 10 \
+    --output overlay.png \
+    --compare
+
+
 -- Downloading calibration_results.txt (to Desktop)
 scp ubuntu@[insert ip]:/home/ubuntu/tlc-calib/tlc-calib/outputs/[insert run name]/calibration_results.txt ~/Desktop/
+scp ubuntu@[insert ip]:/home/ubuntu/tlc-calib/tlc-calib/outputs/[insert run name]/calibration_results.txt ~/Desktop/
+
+
+-- Perturbed & staged optimization commands
+python scripts/train.py --camera cam02 \
+    --perturb-rotation 1.0 \
+    --perturb-translation 0.05 \
+    --freeze-gaussians-until 3000 \
+    --output-dir outputs/combined_test

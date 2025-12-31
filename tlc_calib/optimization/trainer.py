@@ -44,15 +44,24 @@ class TLCCalibTrainer:
         self,
         config: TLCCalibConfig,
         device: str = "cuda",
+        perturb_rotation_deg: float = 0.0,
+        perturb_translation_m: float = 0.0,
+        freeze_gaussians_until: int = 0,
     ):
         """Initialize trainer.
 
         Args:
             config: TLC-Calib configuration
             device: Device to train on
+            perturb_rotation_deg: Add random rotation noise (degrees) to initial calibration
+            perturb_translation_m: Add random translation noise (meters) to initial calibration
+            freeze_gaussians_until: Freeze Gaussian parameters until this iteration (staged optimization)
         """
         self.config = config
         self.device = device
+        self.perturb_rotation_deg = perturb_rotation_deg
+        self.perturb_translation_m = perturb_translation_m
+        self.freeze_gaussians_until = freeze_gaussians_until
 
         # Setup logging
         logging.basicConfig(
@@ -126,6 +135,13 @@ class TLCCalibTrainer:
         initial_extrinsics = self.dataset.get_all_extrinsics()
         initial_extrinsics = {k: v.to(self.device) for k, v in initial_extrinsics.items()}
 
+        # Store GROUND TRUTH extrinsics for comparison (before any perturbation)
+        self.initial_extrinsics = {k: v.clone() for k, v in initial_extrinsics.items()}
+
+        # Apply perturbation if requested (for testing calibration refinement)
+        if self.perturb_rotation_deg > 0 or self.perturb_translation_m > 0:
+            initial_extrinsics = self._perturb_extrinsics(initial_extrinsics)
+
         self.camera_rig = CameraRig(
             camera_ids=self.dataset.get_camera_ids(),
             initial_extrinsics=initial_extrinsics,
@@ -133,9 +149,6 @@ class TLCCalibTrainer:
             translation_lr=self.config.training.translation_lr,
         ).to(self.device)
         logger.info(f"Camera rig created with {len(self.camera_rig)} cameras")
-
-        # Store initial extrinsics for comparison
-        self.initial_extrinsics = {k: v.clone() for k, v in initial_extrinsics.items()}
 
         # 6. Create rasterizer
         image_height, image_width = self.dataset.get_image_size()
@@ -163,6 +176,11 @@ class TLCCalibTrainer:
         self.intrinsics = self.dataset.get_all_intrinsics()
         self.intrinsics = {k: v.to(self.device) for k, v in self.intrinsics.items()}
 
+        # 10. Apply staged optimization if requested
+        if self.freeze_gaussians_until > 0:
+            self._freeze_gaussians()
+            logger.info(f"Gaussians will be unfrozen at iteration {self.freeze_gaussians_until}")
+
         logger.info("Setup complete!")
 
     def _voxelize_points(self, points: Tensor, voxel_size: float) -> Tensor:
@@ -177,6 +195,66 @@ class TLCCalibTrainer:
         voxel_centers = (unique_voxels.float() + 0.5) * voxel_size
 
         return voxel_centers
+
+    def _perturb_extrinsics(self, extrinsics: Dict[str, Tensor]) -> Dict[str, Tensor]:
+        """Apply random perturbation to extrinsics for testing calibration refinement.
+
+        This is useful for testing whether the method can RECOVER from initial errors,
+        rather than starting from ground truth where there's nothing to improve.
+
+        Args:
+            extrinsics: Dict mapping camera_id -> 4x4 extrinsic matrix
+
+        Returns:
+            Dict with perturbed extrinsics
+        """
+        from ..utils.lie_groups import axis_angle_to_rotation_matrix
+
+        perturbed = {}
+        for cam_id, T in extrinsics.items():
+            T_perturbed = T.clone()
+
+            # Perturb rotation (random axis-angle)
+            if self.perturb_rotation_deg > 0:
+                # Random rotation axis
+                axis = torch.randn(3, device=T.device)
+                axis = axis / axis.norm()
+
+                # Random angle in range [-perturb, +perturb]
+                angle_rad = torch.deg2rad(torch.tensor(
+                    self.perturb_rotation_deg * (2 * torch.rand(1).item() - 1),
+                    device=T.device
+                ))
+
+                # Create rotation perturbation
+                axis_angle = axis * angle_rad
+                R_perturb = axis_angle_to_rotation_matrix(axis_angle)
+
+                # Apply perturbation: R_new = R_perturb @ R_original
+                T_perturbed[:3, :3] = R_perturb @ T[:3, :3]
+
+            # Perturb translation (random direction)
+            if self.perturb_translation_m > 0:
+                # Random direction
+                direction = torch.randn(3, device=T.device)
+                direction = direction / direction.norm()
+
+                # Random magnitude in range [0, perturb]
+                magnitude = self.perturb_translation_m * torch.rand(1, device=T.device).item()
+
+                T_perturbed[:3, 3] = T[:3, 3] + direction * magnitude
+
+            perturbed[cam_id] = T_perturbed
+
+            # Log the perturbation applied
+            R_diff = T[:3, :3].T @ T_perturbed[:3, :3]
+            trace = R_diff[0, 0] + R_diff[1, 1] + R_diff[2, 2]
+            cos_theta = torch.clamp((trace - 1) / 2, -1, 1)
+            rot_err = torch.rad2deg(torch.acos(cos_theta)).item()
+            trans_err = torch.norm(T_perturbed[:3, 3] - T[:3, 3]).item()
+            logger.info(f"  {cam_id}: perturbed by rot={rot_err:.3f}°, trans={trans_err:.4f}m")
+
+        return perturbed
 
     def _setup_optimizer(self) -> None:
         """Set up optimizer with separate parameter groups."""
@@ -204,6 +282,28 @@ class TLCCalibTrainer:
             for param_group in self.optimizer.param_groups:
                 param_group['weight_decay'] = 0.0
             logger.info(f"Iteration {iteration}: Disabled weight decay")
+
+    def _update_gaussian_freeze(self, iteration: int) -> None:
+        """Handle staged optimization: freeze/unfreeze Gaussians.
+
+        When freeze_gaussians_until > 0, Gaussian parameters are frozen for
+        the first N iterations. This allows calibration to be refined without
+        Gaussians compensating for calibration errors.
+        """
+        if self.freeze_gaussians_until <= 0:
+            return
+
+        # Check if we should unfreeze Gaussians
+        if iteration == self.freeze_gaussians_until:
+            for param in self.gaussian_model.parameters():
+                param.requires_grad = True
+            logger.info(f"Iteration {iteration}: Unfroze Gaussian parameters")
+
+    def _freeze_gaussians(self) -> None:
+        """Freeze all Gaussian model parameters."""
+        for param in self.gaussian_model.parameters():
+            param.requires_grad = False
+        logger.info("Gaussian parameters frozen for staged optimization")
 
     def train_step(self, batch: Dict) -> Dict[str, Tensor]:
         """Perform a single training step.
@@ -328,6 +428,9 @@ class TLCCalibTrainer:
 
             # Update weight decay
             self._update_weight_decay(self.iteration)
+
+            # Update Gaussian freeze state (staged optimization)
+            self._update_gaussian_freeze(self.iteration)
 
             # Training step
             losses = self.train_step(batch)

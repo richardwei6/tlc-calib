@@ -20,11 +20,38 @@ import torch
 from PIL import Image, ImageDraw
 
 
+def _parse_extrinsic_section(section: str) -> Dict:
+    """Parse a calibration section to extract extrinsic matrix."""
+    # Extract full extrinsic matrix
+    extrinsic_match = re.search(
+        r'Full Extrinsic Matrix \(4x4\):\s*'
+        r'\[\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\]\s*'
+        r'\[\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\]\s*'
+        r'\[\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\]\s*'
+        r'\[\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\]',
+        section
+    )
+
+    if extrinsic_match:
+        extrinsic = np.array([
+            [float(extrinsic_match.group(i)) for i in range(1, 5)],
+            [float(extrinsic_match.group(i)) for i in range(5, 9)],
+            [float(extrinsic_match.group(i)) for i in range(9, 13)],
+            [float(extrinsic_match.group(i)) for i in range(13, 17)],
+        ])
+        return {
+            'rotation': extrinsic[:3, :3],
+            'translation': extrinsic[:3, 3],
+            'extrinsic': extrinsic,
+        }
+    return None
+
+
 def parse_calibration_results(txt_path: str) -> Dict[str, Dict]:
     """Parse calibration_results.txt file.
 
     Returns:
-        Dict mapping camera_id to dict with 'rotation', 'translation', 'extrinsic'
+        Dict mapping camera_id to dict with 'extrinsic', 'original_extrinsic', etc.
     """
     results = {}
 
@@ -44,57 +71,28 @@ def parse_calibration_results(txt_path: str) -> Dict[str, Dict]:
             continue
         cam_id = cam_match.group(1)
 
-        # Extract rotation matrix
-        rotation_match = re.search(
-            r'Rotation Matrix \(3x3\):\s*'
-            r'\[\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\]\s*'
-            r'\[\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\]\s*'
-            r'\[\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\]',
-            section
-        )
+        # Check if this has the new format with OPTIMIZED/ORIGINAL sections
+        if "=== OPTIMIZED CALIBRATION ===" in section:
+            # New format with both optimized and original
+            optimized_section = section.split("=== ORIGINAL CALIBRATION ===")[0]
+            original_section = section.split("=== ORIGINAL CALIBRATION ===")[1] if "=== ORIGINAL CALIBRATION ===" in section else ""
 
-        # Extract translation vector
-        translation_match = re.search(
-            r'Translation Vector \(x, y, z\):\s*'
-            r'\[\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\]',
-            section
-        )
+            optimized = _parse_extrinsic_section(optimized_section)
+            original = _parse_extrinsic_section(original_section) if original_section else None
 
-        # Extract full extrinsic matrix
-        extrinsic_match = re.search(
-            r'Full Extrinsic Matrix \(4x4\):\s*'
-            r'\[\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\]\s*'
-            r'\[\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\]\s*'
-            r'\[\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\]\s*'
-            r'\[\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\]',
-            section
-        )
-
-        if rotation_match and translation_match and extrinsic_match:
-            rotation = np.array([
-                [float(rotation_match.group(i)) for i in range(1, 4)],
-                [float(rotation_match.group(i)) for i in range(4, 7)],
-                [float(rotation_match.group(i)) for i in range(7, 10)],
-            ])
-
-            translation = np.array([
-                float(translation_match.group(1)),
-                float(translation_match.group(2)),
-                float(translation_match.group(3)),
-            ])
-
-            extrinsic = np.array([
-                [float(extrinsic_match.group(i)) for i in range(1, 5)],
-                [float(extrinsic_match.group(i)) for i in range(5, 9)],
-                [float(extrinsic_match.group(i)) for i in range(9, 13)],
-                [float(extrinsic_match.group(i)) for i in range(13, 17)],
-            ])
-
-            results[cam_id] = {
-                'rotation': rotation,
-                'translation': translation,
-                'extrinsic': extrinsic,
-            }
+            if optimized:
+                results[cam_id] = {
+                    'rotation': optimized['rotation'],
+                    'translation': optimized['translation'],
+                    'extrinsic': optimized['extrinsic'],
+                }
+                if original:
+                    results[cam_id]['original_extrinsic'] = original['extrinsic']
+        else:
+            # Old format - single extrinsic (backwards compatibility)
+            parsed = _parse_extrinsic_section(section)
+            if parsed:
+                results[cam_id] = parsed
 
     return results
 
@@ -342,6 +340,11 @@ def main():
         action="store_true",
         help="Use all PCD frames (concatenated)",
     )
+    parser.add_argument(
+        "--compare",
+        action="store_true",
+        help="Also output original calibration overlay for comparison",
+    )
 
     args = parser.parse_args()
 
@@ -430,8 +433,8 @@ def main():
 
     print(f"Loaded {len(points)} points")
 
-    # Project points
-    print("Projecting points to image...")
+    # Project points with OPTIMIZED calibration
+    print("Projecting points to image (optimized calibration)...")
     pixels, depths, intensities = project_points_to_image(
         points, K, extrinsic, original_size, args.downsample
     )
@@ -447,14 +450,45 @@ def main():
 
     # Save result
     result.save(args.output)
-    print(f"Saved overlay to {args.output}")
+    print(f"Saved optimized overlay to {args.output}")
 
     # Print some stats
     if len(depths) > 0:
-        print(f"\nDepth statistics:")
+        print(f"\nDepth statistics (optimized):")
         print(f"  Min: {depths.min():.2f}m")
         print(f"  Max: {depths.max():.2f}m")
         print(f"  Mean: {depths.mean():.2f}m")
+
+    # Also create original calibration overlay if --compare and original exists
+    if args.compare and 'original_extrinsic' in calib_results[args.camera]:
+        original_extrinsic = calib_results[args.camera]['original_extrinsic']
+        print("\nProjecting points to image (original calibration)...")
+        orig_pixels, orig_depths, _ = project_points_to_image(
+            points, K, original_extrinsic, original_size, args.downsample
+        )
+        print(f"Projected {len(orig_pixels)} visible points")
+
+        # Reload image for original overlay
+        image_orig = Image.open(image_path)
+        if args.downsample > 1:
+            new_size = (image_orig.width // args.downsample, image_orig.height // args.downsample)
+            image_orig = image_orig.resize(new_size, Image.Resampling.LANCZOS)
+
+        orig_result = create_overlay(image_orig, orig_pixels, orig_depths, args.point_size)
+
+        # Save original overlay with _original suffix
+        output_path = Path(args.output)
+        orig_output = output_path.parent / f"{output_path.stem}_original{output_path.suffix}"
+        orig_result.save(orig_output)
+        print(f"Saved original overlay to {orig_output}")
+
+        if len(orig_depths) > 0:
+            print(f"\nDepth statistics (original):")
+            print(f"  Min: {orig_depths.min():.2f}m")
+            print(f"  Max: {orig_depths.max():.2f}m")
+            print(f"  Mean: {orig_depths.mean():.2f}m")
+    elif args.compare:
+        print("\nWarning: --compare specified but no original calibration found in results file")
 
 
 if __name__ == "__main__":
