@@ -197,10 +197,13 @@ class TLCCalibTrainer:
         return voxel_centers
 
     def _perturb_extrinsics(self, extrinsics: Dict[str, Tensor]) -> Dict[str, Tensor]:
-        """Apply random perturbation to extrinsics for testing calibration refinement.
+        """Apply exact perturbation to extrinsics for testing calibration refinement.
 
         This is useful for testing whether the method can RECOVER from initial errors,
         rather than starting from ground truth where there's nothing to improve.
+
+        The perturbation applies EXACTLY the specified rotation (degrees) and 
+        translation (meters) amounts, around/along random axes/directions.
 
         Args:
             extrinsics: Dict mapping camera_id -> 4x4 extrinsic matrix
@@ -214,15 +217,15 @@ class TLCCalibTrainer:
         for cam_id, T in extrinsics.items():
             T_perturbed = T.clone()
 
-            # Perturb rotation (random axis-angle)
+            # Perturb rotation (exact angle, random axis)
             if self.perturb_rotation_deg > 0:
-                # Random rotation axis
+                # Random rotation axis (unit vector)
                 axis = torch.randn(3, device=T.device)
                 axis = axis / axis.norm()
 
-                # Random angle in range [-perturb, +perturb]
+                # EXACT angle as specified
                 angle_rad = torch.deg2rad(torch.tensor(
-                    self.perturb_rotation_deg * (2 * torch.rand(1).item() - 1),
+                    self.perturb_rotation_deg,
                     device=T.device
                 ))
 
@@ -233,16 +236,14 @@ class TLCCalibTrainer:
                 # Apply perturbation: R_new = R_perturb @ R_original
                 T_perturbed[:3, :3] = R_perturb @ T[:3, :3]
 
-            # Perturb translation (random direction)
+            # Perturb translation (exact magnitude, random direction)
             if self.perturb_translation_m > 0:
-                # Random direction
+                # Random direction (unit vector)
                 direction = torch.randn(3, device=T.device)
                 direction = direction / direction.norm()
 
-                # Random magnitude in range [0, perturb]
-                magnitude = self.perturb_translation_m * torch.rand(1, device=T.device).item()
-
-                T_perturbed[:3, 3] = T[:3, 3] + direction * magnitude
+                # EXACT magnitude as specified
+                T_perturbed[:3, 3] = T[:3, 3] + direction * self.perturb_translation_m
 
             perturbed[cam_id] = T_perturbed
 
