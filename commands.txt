@@ -14,7 +14,7 @@ python scripts/train.py \
     --iterations 30000 \
     --rotation-lr 0.00001 \
     --translation-lr 0.00005 \
-    --perturb-rotation 2.0 \
+    --perturb-rotation 0.5 \
     --perturb-translation 0.1 \
     --warmup-iterations 500 \
     --alternating-interval 500 \
