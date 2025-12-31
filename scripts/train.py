@@ -162,6 +162,20 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Freeze Gaussian parameters until this iteration (staged optimization)",
     )
+    parser.add_argument(
+        "--alternating-interval",
+        type=int,
+        default=0,
+        help="Alternate between training Gaussians and calibration every N iterations. "
+             "Recommended: 500-1000. Set to 0 to disable.",
+    )
+    parser.add_argument(
+        "--warmup-iterations",
+        type=int,
+        default=0,
+        help="Train Gaussians only for N iterations before alternating. "
+             "Recommended: 500-1000. Prevents 'baked-in' calibration errors.",
+    )
 
     # Output arguments
     parser.add_argument(
@@ -367,6 +381,8 @@ def main():
         perturb_rotation_deg=args.perturb_rotation,
         perturb_translation_m=args.perturb_translation,
         freeze_gaussians_until=args.freeze_gaussians_until,
+        alternating_interval=args.alternating_interval,
+        warmup_iterations=args.warmup_iterations,
     )
 
     # Log calibration refinement settings
@@ -374,6 +390,8 @@ def main():
         logger.info(f"Initial calibration will be perturbed by: rot={args.perturb_rotation}°, trans={args.perturb_translation}m")
     if args.freeze_gaussians_until > 0:
         logger.info(f"Staged optimization: Gaussians frozen until iteration {args.freeze_gaussians_until}")
+    if args.alternating_interval > 0:
+        logger.info(f"Alternating optimization: interval={args.alternating_interval}, warmup={args.warmup_iterations}")
 
     # Setup trainer
     trainer.setup()

@@ -47,6 +47,8 @@ class TLCCalibTrainer:
         perturb_rotation_deg: float = 0.0,
         perturb_translation_m: float = 0.0,
         freeze_gaussians_until: int = 0,
+        alternating_interval: int = 0,
+        warmup_iterations: int = 0,
     ):
         """Initialize trainer.
 
@@ -56,12 +58,22 @@ class TLCCalibTrainer:
             perturb_rotation_deg: Add random rotation noise (degrees) to initial calibration
             perturb_translation_m: Add random translation noise (meters) to initial calibration
             freeze_gaussians_until: Freeze Gaussian parameters until this iteration (staged optimization)
+            alternating_interval: If > 0, alternate between training Gaussians and calibration
+                                  every N iterations. Recommended: 500-1000.
+            warmup_iterations: Train Gaussians only for this many iterations before starting
+                              alternating optimization. Recommended: 500-1000.
         """
         self.config = config
         self.device = device
         self.perturb_rotation_deg = perturb_rotation_deg
         self.perturb_translation_m = perturb_translation_m
         self.freeze_gaussians_until = freeze_gaussians_until
+        self.alternating_interval = alternating_interval
+        self.warmup_iterations = warmup_iterations
+        
+        # Track which parameters are currently being trained
+        self._gaussians_frozen = False
+        self._calibration_frozen = False
 
         # Setup logging
         logging.basicConfig(
@@ -296,15 +308,81 @@ class TLCCalibTrainer:
 
         # Check if we should unfreeze Gaussians
         if iteration == self.freeze_gaussians_until:
-            for param in self.gaussian_model.parameters():
-                param.requires_grad = True
-            logger.info(f"Iteration {iteration}: Unfroze Gaussian parameters")
+            self._unfreeze_gaussians()
 
     def _freeze_gaussians(self) -> None:
         """Freeze all Gaussian model parameters."""
-        for param in self.gaussian_model.parameters():
-            param.requires_grad = False
-        logger.info("Gaussian parameters frozen for staged optimization")
+        if not self._gaussians_frozen:
+            for param in self.gaussian_model.parameters():
+                param.requires_grad = False
+            self._gaussians_frozen = True
+            logger.info("Gaussian parameters FROZEN")
+
+    def _unfreeze_gaussians(self) -> None:
+        """Unfreeze all Gaussian model parameters."""
+        if self._gaussians_frozen:
+            for param in self.gaussian_model.parameters():
+                param.requires_grad = True
+            self._gaussians_frozen = False
+            logger.info("Gaussian parameters UNFROZEN")
+
+    def _freeze_calibration(self) -> None:
+        """Freeze all camera calibration parameters."""
+        if not self._calibration_frozen:
+            for param in self.camera_rig.parameters():
+                param.requires_grad = False
+            self._calibration_frozen = True
+            logger.info("Calibration parameters FROZEN")
+
+    def _unfreeze_calibration(self) -> None:
+        """Unfreeze all camera calibration parameters."""
+        if self._calibration_frozen:
+            for param in self.camera_rig.parameters():
+                param.requires_grad = True
+            self._calibration_frozen = False
+            logger.info("Calibration parameters UNFROZEN")
+
+    def _update_alternating_optimization(self, iteration: int) -> None:
+        """Handle alternating optimization between Gaussians and calibration.
+        
+        Strategy:
+        1. Warmup phase (0 to warmup_iterations): Train Gaussians only, freeze calibration
+           - This builds a scene representation without calibration drift
+           - Keep warmup SHORT (500-1000) to avoid "baking in" errors
+        
+        2. Alternating phase: Switch every alternating_interval iterations
+           - Train calibration (Gaussians frozen): Refine poses using current scene
+           - Train Gaussians (calibration frozen): Update scene for current poses
+        """
+        if self.alternating_interval <= 0:
+            return
+            
+        # Warmup phase: train Gaussians only
+        if iteration < self.warmup_iterations:
+            if iteration == 0:
+                self._freeze_calibration()
+                self._unfreeze_gaussians()
+                logger.info(f"WARMUP PHASE: Training Gaussians only for {self.warmup_iterations} iterations")
+            return
+        
+        # End of warmup - start alternating
+        if iteration == self.warmup_iterations:
+            logger.info("WARMUP COMPLETE - Starting alternating optimization")
+        
+        # Calculate which phase we're in (after warmup)
+        iter_after_warmup = iteration - self.warmup_iterations
+        cycle_position = iter_after_warmup % (2 * self.alternating_interval)
+        
+        # First half of cycle: train calibration (Gaussians frozen)
+        if cycle_position == 0:
+            self._freeze_gaussians()
+            self._unfreeze_calibration()
+            logger.info(f"Iteration {iteration}: CALIBRATION PHASE (Gaussians frozen)")
+        # Second half of cycle: train Gaussians (calibration frozen)
+        elif cycle_position == self.alternating_interval:
+            self._freeze_calibration()
+            self._unfreeze_gaussians()
+            logger.info(f"Iteration {iteration}: GAUSSIAN PHASE (Calibration frozen)")
 
     def train_step(self, batch: Dict) -> Dict[str, Tensor]:
         """Perform a single training step.
@@ -432,6 +510,9 @@ class TLCCalibTrainer:
 
             # Update Gaussian freeze state (staged optimization)
             self._update_gaussian_freeze(self.iteration)
+            
+            # Update alternating optimization state
+            self._update_alternating_optimization(self.iteration)
 
             # Training step
             losses = self.train_step(batch)
